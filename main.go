@@ -3,12 +3,14 @@ package main
 import (
 	"database/sql"
 	"errors"
-	"fmt"
-	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
 const (
@@ -30,33 +32,41 @@ type ShortenResponse struct {
 // handler for shortening the url
 func shortenURLHandler(db *sql.DB, baseURL string) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		logRequest(c, "shorten_url")
+
 		var request ShortenRequest
 
 		if err := c.ShouldBindJSON(&request); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "invalid request body",
-			})
+			log.Warn().
+				Err(err).
+				Int("status", http.StatusBadRequest).
+				Msg("shorten request failed validation")
+			respondWithError(c, http.StatusBadRequest, "invalid request body")
 			return
 		}
 
 		if request.URL == "" {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "url is required",
-			})
+			log.Warn().
+				Int("status", http.StatusBadRequest).
+				Msg("shorten request missing url")
+			respondWithError(c, http.StatusBadRequest, "url is required")
 			return
 		}
 
 		if _, err := url.ParseRequestURI(request.URL); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "invalid url",
-			})
+			log.Warn().
+				Err(err).
+				Int("status", http.StatusBadRequest).
+				Msg("shorten request has invalid url")
+			respondWithError(c, http.StatusBadRequest, "invalid url")
 			return
 		}
 
 		if db == nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "database connection is not initialized",
-			})
+			log.Error().
+				Int("status", http.StatusInternalServerError).
+				Msg("shorten request failed because database is not initialized")
+			respondWithError(c, http.StatusInternalServerError, "database connection is not initialized")
 			return
 		}
 
@@ -65,76 +75,134 @@ func shortenURLHandler(db *sql.DB, baseURL string) gin.HandlerFunc {
 		for attempt := 0; attempt < shortCodeMaxAttempts; attempt++ {
 			shortCode = generateShortCode(shortCodeLength)
 			if shortCode == "" {
-				c.JSON(http.StatusInternalServerError, gin.H{
-					"error": "failed to generate short code",
-				})
+				log.Error().
+					Int("status", http.StatusInternalServerError).
+					Msg("shorten request failed to generate short code")
+				respondWithError(c, http.StatusInternalServerError, "failed to generate short code")
 				return
 			}
 
 			if err := saveMapping(db, shortCode, request.URL); err != nil {
 				if isDuplicateShortCodeError(err) {
+					log.Warn().
+						Err(err).
+						Str("short_code", shortCode).
+						Int("attempt", attempt+1).
+						Msg("generated duplicate short code")
 					continue
 				}
 
-				c.JSON(http.StatusInternalServerError, gin.H{
-					"error": "failed to save url mapping",
-				})
+				log.Error().
+					Err(err).
+					Int("status", http.StatusInternalServerError).
+					Msg("shorten request failed to save url mapping")
+				respondWithError(c, http.StatusInternalServerError, "failed to save url mapping")
 				return
 			}
 
 			response := ShortenResponse{
 				ShortCode: shortCode,
-				ShortURL:  fmt.Sprintf("%s/%s", baseURL, shortCode),
+				ShortURL:  baseURL + "/" + shortCode,
 			}
 
+			log.Info().
+				Str("short_code", response.ShortCode).
+				Str("short_url", response.ShortURL).
+				Int("status", http.StatusCreated).
+				Msg("shorten request completed")
 			c.JSON(http.StatusCreated, response)
 			return
 		}
 
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "failed to generate unique short code",
-		})
+		log.Error().
+			Int("status", http.StatusInternalServerError).
+			Int("attempts", shortCodeMaxAttempts).
+			Msg("shorten request failed to generate unique short code")
+		respondWithError(c, http.StatusInternalServerError, "failed to generate unique short code")
 	}
 }
 
 // redirect to original url
 func redirectURLHandler(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		logRequest(c, "redirect_url")
+
+		shortCode := c.Param("shortCode")
+
 		if db == nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "database connection is not initialized",
-			})
+			log.Error().
+				Str("short_code", shortCode).
+				Int("status", http.StatusInternalServerError).
+				Msg("redirect request failed because database is not initialized")
+			respondWithError(c, http.StatusInternalServerError, "database connection is not initialized")
 			return
 		}
 
-		shortCode := c.Param("shortCode")
 		originalURL, err := getOriginalURL(db, shortCode)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				c.JSON(http.StatusNotFound, gin.H{
-					"error": "short code not found",
-				})
+				log.Warn().
+					Str("short_code", shortCode).
+					Int("status", http.StatusNotFound).
+					Msg("redirect request short code not found")
+				respondWithError(c, http.StatusNotFound, "short code not found")
 				return
 			}
 
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "failed to get original url",
-			})
+			log.Error().
+				Err(err).
+				Str("short_code", shortCode).
+				Int("status", http.StatusInternalServerError).
+				Msg("redirect request failed to get original url")
+			respondWithError(c, http.StatusInternalServerError, "failed to get original url")
 			return
 		}
 
+		log.Info().
+			Str("short_code", shortCode).
+			Str("original_url", originalURL).
+			Int("status", http.StatusFound).
+			Msg("redirect request completed")
 		c.Redirect(http.StatusFound, originalURL)
 	}
 }
 
+func respondWithError(c *gin.Context, statusCode int, message string) {
+	c.JSON(statusCode, gin.H{
+		"error": message,
+	})
+}
+
+func logRequest(c *gin.Context, handler string) {
+	path := c.FullPath()
+	if path == "" {
+		path = c.Request.URL.Path
+	}
+
+	log.Info().
+		Str("handler", handler).
+		Str("method", c.Request.Method).
+		Str("path", path).
+		Str("client_ip", c.ClientIP()).
+		Msg("received request")
+}
+
+func configureLogger() {
+	zerolog.TimeFieldFormat = time.RFC3339
+	zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	log.Logger = log.Output(os.Stdout).With().Timestamp().Logger()
+}
+
 func main() {
-	fmt.Println("Sample short code:", generateShortCode(6))
+	configureLogger()
+
+	log.Info().Str("short_code", generateShortCode(6)).Msg("generated sample short code")
 
 	config := loadConfig()
 
 	database, err := initDB(config.DBPath)
 	if err != nil {
-		log.Fatal("failed to initialize database:", err)
+		log.Fatal().Err(err).Str("db_path", config.DBPath).Msg("failed to initialize database")
 	}
 	defer database.Close()
 
@@ -142,6 +210,10 @@ func main() {
 
 	// health check
 	router.GET("/health", func(c *gin.Context) {
+		logRequest(c, "health")
+		log.Info().
+			Int("status", http.StatusOK).
+			Msg("health check completed")
 		c.JSON(http.StatusOK, gin.H{
 			"status": "ok",
 		})
@@ -149,6 +221,10 @@ func main() {
 
 	// ping
 	router.GET("/ping", func(c *gin.Context) {
+		logRequest(c, "ping")
+		log.Info().
+			Int("status", http.StatusOK).
+			Msg("ping completed")
 		c.JSON(http.StatusOK, gin.H{
 			"message": "pong",
 		})
@@ -157,5 +233,7 @@ func main() {
 	router.POST("/shorten", shortenURLHandler(database, config.BaseURL))
 	router.GET("/:shortCode", redirectURLHandler(database))
 
-	router.Run(":" + config.Port)
+	if err := router.Run(":" + config.Port); err != nil {
+		log.Fatal().Err(err).Str("port", config.Port).Msg("failed to start server")
+	}
 }
