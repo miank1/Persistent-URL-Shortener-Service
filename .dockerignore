@@ -1,0 +1,15 @@
+.git
+.gitignore
+
+*.db
+*.sqbpro
+*.exe
+*.log
+
+data/
+tmp/
+dist/
+build/
+
+Dockerfile
+README.md

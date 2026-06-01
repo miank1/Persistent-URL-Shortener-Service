@@ -18,3 +18,30 @@ $env:DB_PATH = "urls.db"
 $env:BASE_URL = "http://localhost:8080"
 go run .
 ```
+
+## Docker
+
+Build the image:
+
+```powershell
+docker build -t url-shortener-app .
+```
+
+Run the container with a persistent database volume:
+
+```powershell
+docker run --rm -p 8080:8080 -e BASE_URL=http://localhost:8080 -v "${PWD}/data:/app/data" url-shortener-app
+```
+
+The container defaults to:
+
+| Variable | Default |
+| --- | --- |
+| `PORT` | `8080` |
+| `DB_PATH` | `/app/data/urls.db` |
+
+Test it:
+
+```powershell
+curl http://localhost:8080/health
+```
