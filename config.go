@@ -4,7 +4,7 @@ import "os"
 
 const (
 	defaultPort   = "8080"
-	defaultDBPath = "urls.db"
+	defaultDBPath = "urls.db" // point to local folder
 )
 
 type Config struct {
