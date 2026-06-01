@@ -12,7 +12,6 @@ import (
 )
 
 const (
-	baseURL              = "http://localhost:8080"
 	shortCodeLength      = 6
 	shortCodeMaxAttempts = 5
 )
@@ -29,7 +28,7 @@ type ShortenResponse struct {
 }
 
 // handler for shortening the url
-func shortenURLHandler(db *sql.DB) gin.HandlerFunc {
+func shortenURLHandler(db *sql.DB, baseURL string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var request ShortenRequest
 
@@ -131,7 +130,9 @@ func redirectURLHandler(db *sql.DB) gin.HandlerFunc {
 func main() {
 	fmt.Println("Sample short code:", generateShortCode(6))
 
-	database, err := initDB("D:/projects/url-shortener/urls.db")
+	config := loadConfig()
+
+	database, err := initDB(config.DBPath)
 	if err != nil {
 		log.Fatal("failed to initialize database:", err)
 	}
@@ -153,8 +154,8 @@ func main() {
 		})
 	})
 
-	router.POST("/shorten", shortenURLHandler(database))
+	router.POST("/shorten", shortenURLHandler(database, config.BaseURL))
 	router.GET("/:shortCode", redirectURLHandler(database))
 
-	router.Run(":8080")
+	router.Run(":" + config.Port)
 }
