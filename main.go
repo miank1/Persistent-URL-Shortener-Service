@@ -29,6 +29,11 @@ type ShortenResponse struct {
 	ShortURL  string `json:"shortUrl"`
 }
 
+type StatsResponse struct {
+	OriginalURL string `json:"originalUrl"`
+	ClickCount  int    `json:"clickCount"`
+}
+
 // handler for shortening the url
 func shortenURLHandler(db *sql.DB, baseURL string) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -158,12 +163,68 @@ func redirectURLHandler(db *sql.DB) gin.HandlerFunc {
 			return
 		}
 
+		if err := incrementClickCount(db, shortCode); err != nil {
+			log.Error().
+				Err(err).
+				Str("short_code", shortCode).
+				Msg("redirect request failed to increment click count")
+		}
+
 		log.Info().
 			Str("short_code", shortCode).
 			Str("original_url", originalURL).
 			Int("status", http.StatusFound).
 			Msg("redirect request completed")
 		c.Redirect(http.StatusFound, originalURL)
+	}
+}
+
+func getStatsHandler(db *sql.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		logRequest(c, "get_stats")
+
+		shortCode := c.Param("shortCode")
+
+		if db == nil {
+			log.Error().
+				Str("short_code", shortCode).
+				Int("status", http.StatusInternalServerError).
+				Msg("stats request failed because database is not initialized")
+			respondWithError(c, http.StatusInternalServerError, "database connection is not initialized")
+			return
+		}
+
+		originalURL, clickCount, err := getURLStats(db, shortCode)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				log.Warn().
+					Str("short_code", shortCode).
+					Int("status", http.StatusNotFound).
+					Msg("stats request short code not found")
+				respondWithError(c, http.StatusNotFound, "short code not found")
+				return
+			}
+
+			log.Error().
+				Err(err).
+				Str("short_code", shortCode).
+				Int("status", http.StatusInternalServerError).
+				Msg("stats request failed to get url stats")
+			respondWithError(c, http.StatusInternalServerError, "failed to get url stats")
+			return
+		}
+
+		response := StatsResponse{
+			OriginalURL: originalURL,
+			ClickCount:  clickCount,
+		}
+
+		log.Info().
+			Str("short_code", shortCode).
+			Int("click_count", clickCount).
+			Int("status", http.StatusOK).
+			Msg("stats request completed")
+		c.JSON(http.StatusOK, response)
 	}
 }
 
@@ -231,6 +292,7 @@ func main() {
 	})
 
 	router.POST("/shorten", shortenURLHandler(database, config.BaseURL))
+	router.GET("/stats/:shortCode", getStatsHandler(database))
 	router.GET("/:shortCode", redirectURLHandler(database))
 
 	if err := router.Run(":" + config.Port); err != nil {

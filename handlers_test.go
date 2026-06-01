@@ -76,6 +76,15 @@ func TestRedirectURLHandlerRedirectsToOriginalURL(t *testing.T) {
 	if location := response.Header().Get("Location"); location != originalURL {
 		t.Fatalf("expected Location header %q, got %q", originalURL, location)
 	}
+
+	_, clickCount, err := getURLStats(db, shortCode)
+	if err != nil {
+		t.Fatalf("getURLStats returned error: %v", err)
+	}
+
+	if clickCount != 1 {
+		t.Fatalf("expected click count 1, got %d", clickCount)
+	}
 }
 
 func TestRedirectURLHandlerReturnsNotFound(t *testing.T) {
@@ -87,11 +96,81 @@ func TestRedirectURLHandlerReturnsNotFound(t *testing.T) {
 	assertErrorResponse(t, response, http.StatusNotFound, "short code not found")
 }
 
+func TestGetStatsHandlerReturnsStats(t *testing.T) {
+	db := setupTestDB(t)
+	router := setupTestRouter(db)
+
+	shortCode := "abc123"
+	originalURL := "https://example.com"
+
+	if err := saveMapping(db, shortCode, originalURL); err != nil {
+		t.Fatalf("saveMapping returned error: %v", err)
+	}
+
+	response := performRequest(router, http.MethodGet, "/stats/"+shortCode, nil)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, response.Code)
+	}
+
+	var body StatsResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("failed to decode response body: %v", err)
+	}
+
+	if body.OriginalURL != originalURL {
+		t.Fatalf("expected original URL %q, got %q", originalURL, body.OriginalURL)
+	}
+
+	if body.ClickCount != 0 {
+		t.Fatalf("expected click count 0, got %d", body.ClickCount)
+	}
+}
+
+func TestGetStatsHandlerReturnsUpdatedClickCountAfterRedirect(t *testing.T) {
+	db := setupTestDB(t)
+	router := setupTestRouter(db)
+
+	shortCode := "abc123"
+	originalURL := "https://example.com"
+
+	if err := saveMapping(db, shortCode, originalURL); err != nil {
+		t.Fatalf("saveMapping returned error: %v", err)
+	}
+
+	performRequest(router, http.MethodGet, "/"+shortCode, nil)
+
+	response := performRequest(router, http.MethodGet, "/stats/"+shortCode, nil)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, response.Code)
+	}
+
+	var body StatsResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("failed to decode response body: %v", err)
+	}
+
+	if body.ClickCount != 1 {
+		t.Fatalf("expected click count 1, got %d", body.ClickCount)
+	}
+}
+
+func TestGetStatsHandlerReturnsNotFound(t *testing.T) {
+	db := setupTestDB(t)
+	router := setupTestRouter(db)
+
+	response := performRequest(router, http.MethodGet, "/stats/missing", nil)
+
+	assertErrorResponse(t, response, http.StatusNotFound, "short code not found")
+}
+
 func setupTestRouter(db *sql.DB) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 
 	router := gin.New()
 	router.POST("/shorten", shortenURLHandler(db, testBaseURL))
+	router.GET("/stats/:shortCode", getStatsHandler(db))
 	router.GET("/:shortCode", redirectURLHandler(db))
 
 	return router
